@@ -7,6 +7,7 @@ const satelliteData = [
     velocity: '7.66 km/s',
     status: 'Operational',
     color: '#d7c5ff',
+    initialFuel: 85,
   },
   {
     id: '25338',
@@ -16,16 +17,18 @@ const satelliteData = [
     velocity: '3.87 km/s',
     status: 'Operational',
     color: '#73cfff',
+    initialFuel: 62,
   },
- {
-  id: '41866',
-  name: 'GOES-16',
-  type: 'GEO',
-  altitude: '35,786 km',
-  velocity: '3.07 km/s',
-  status: 'Operational',
-  color: '#e8bd83',
-},
+  {
+    id: '41866',
+    name: 'GOES-16',
+    type: 'GEO',
+    altitude: '35,786 km',
+    velocity: '3.07 km/s',
+    status: 'Operational',
+    color: '#e8bd83',
+    initialFuel: 94,
+  },
 ]
 
 export default satelliteData

@@ -16,7 +16,14 @@ const [objectType, setObjectType] = useState('SATELLITES')
 const [simulationTime, setSimulationTime] = useState(0)
 const [selectedAlert, setSelectedAlert] = useState(null)
 const [manoeuvre, setManoeuvre] = useState(null)
-const [fuelReserve, setFuelReserve] = useState(100)
+const [fuelReserves, setFuelReserves] = useState(() =>
+  Object.fromEntries(
+    satelliteData.map((satellite) => [
+      satellite.id,
+      satellite.initialFuel,
+    ])
+  )
+)
 const [disposalStrategy, setDisposalStrategy] = useState('deorbit')
 const [disposalPlan, setDisposalPlan] = useState(null)
 const [disposalStatus, setDisposalStatus] = useState('ACTIVE')
@@ -241,12 +248,18 @@ onClick={() => {
   onClick={() => {
     const fuelCost = Number(disposalPlan.fuel)
 
-    if (fuelReserve < fuelCost) {
+   if ((fuelReserves[selectedSatelliteData.id] ?? 0) < fuelCost) { 
       alert('Insufficient fuel reserve!')
       return
     }
 
-    setFuelReserve((fuel) => fuel - fuelCost)
+    setFuelReserves((prev) => ({
+  ...prev,
+  [selectedSatelliteData.id]: Math.max(
+    0,
+    (prev[selectedSatelliteData.id] ?? 0) - fuelCost
+  ),
+}))
     setDisposalStatus('DISPOSAL INITIATED')
 setTrackingActivity((activities) => [
   {
@@ -260,7 +273,7 @@ setTrackingActivity((activities) => [
     console.log('Disposal executed:', {
       strategy: disposalPlan.name,
       fuelConsumed: fuelCost,
-      remainingFuel: fuelReserve - fuelCost
+     remainingFuel: (fuelReserves[selectedSatelliteData.id] ?? 0) - fuelCost
     })
   }}
 >
@@ -271,7 +284,9 @@ setTrackingActivity((activities) => [
   STATUS: {disposalStatus}
 </small>
 <small className="disposal-status">
-  FUEL AFTER DISPOSAL: {fuelReserve.toFixed(2)}%
+FUEL AFTER DISPOSAL: {
+  (fuelReserves[selectedSatelliteData.id] ?? 0).toFixed(2)
+}%  
 </small>
 
   </div>
@@ -424,20 +439,34 @@ setTrackingActivity((activities) => [
   <span>Detected close approaches</span>
 </div>
             <small className="muted">Waiting for orbital calculations</small>
-            <div className="fuel-panel">
+<div className="fuel-panel">
   <div className="fuel-heading">
     <span>FUEL RESERVE</span>
-    <strong>{fuelReserve.toFixed(2)}%</strong>
+    <strong>
+      {selectedSatelliteData
+        ? `${(fuelReserves[selectedSatelliteData.id] ?? 0).toFixed(2)}%`
+        : '--'}
+    </strong>
   </div>
 
   <div className="fuel-track">
     <div
       className="fuel-fill"
-      style={{ width: `${fuelReserve}%` }}
+      style={{
+        width: `${
+          selectedSatelliteData
+            ? fuelReserves[selectedSatelliteData.id] ?? 0
+            : 0
+        }%`
+      }}
     />
   </div>
 
-  <small>Remaining manoeuvring capacity</small>
+  <small>
+    {selectedSatelliteData
+      ? `${selectedSatelliteData.name} · Remaining manoeuvring capacity`
+      : 'Select a satellite to view its fuel reserve'}
+  </small>
 </div>
 
 {selectedAlert && (
@@ -481,32 +510,55 @@ setTrackingActivity((activities) => [
       {manoeuvre.status}
     </span>
     <div className="manoeuvre-actions">
- <button
+<button
   className="execute-button"
   onClick={() => {
-    if (manoeuvre && fuelReserve >= manoeuvre.fuelCost) {
-      setFuelReserve((fuel) =>
-        Math.max(0, fuel - manoeuvre.fuelCost)
-      )
+    const targetSatellite = satelliteData.find(
+      (satellite) => satellite.name === manoeuvre.satellite
+    )
 
-      setManoeuvre((current) => ({
-        ...current,
-        status: 'EXECUTED',
-      }))
-      setTrackingActivity((activities) => [
-  {
-    id: Date.now(),
-    action: 'AVOIDANCE MANOEUVRE',
-    target: manoeuvre.satellite,
-    time: `T+${simulationTime}`,
-  },
-  ...activities,
-].slice(0, 4))
+    if (!targetSatellite) {
+      alert('Satellite not found!')
+      return
     }
+
+    const currentFuel = fuelReserves[targetSatellite.id] ?? 0
+
+    if (currentFuel < manoeuvre.fuelCost) {
+      alert('Insufficient fuel reserve!')
+      return
+    }
+
+    setFuelReserves((prev) => ({
+      ...prev,
+      [targetSatellite.id]: Math.max(
+        0,
+        (prev[targetSatellite.id] ?? 0) - manoeuvre.fuelCost
+      ),
+    }))
+
+    setManoeuvre((current) => ({
+      ...current,
+      status: 'EXECUTED',
+    }))
+
+    setTrackingActivity((activities) => [
+      {
+        id: Date.now(),
+        action: 'AVOIDANCE MANOEUVRE',
+        target: manoeuvre.satellite,
+        time: `T+${simulationTime}`,
+      },
+      ...activities,
+    ].slice(0, 4))
   }}
   disabled={
     manoeuvre.status === 'EXECUTED' ||
-    fuelReserve < manoeuvre.fuelCost
+    (fuelReserves[
+      satelliteData.find((satellite) =>
+        satellite.name === manoeuvre.satellite
+      )?.id
+    ] ?? 0) < manoeuvre.fuelCost
   }
 >
   EXECUTE
