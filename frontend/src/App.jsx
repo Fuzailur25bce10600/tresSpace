@@ -1,13 +1,111 @@
 
 import './App.css'
 import Earth from './components/Earth'
-import satelliteData from './data/satellites'
-import { useState } from 'react'
+import fallbackSatelliteData from './data/satellites'
+import { useEffect, useState } from 'react'
+import { getSatellites, getCollisions, optimizeEncounter } from './api'
 import debrisData from './data/debris'
-import { detectCollisions } from './utils/collisionEngine'
-import { generateManoeuvre } from './utils/manoeuvreEngine'
 
 function App() {
+  const [satelliteData, setSatelliteData] = useState(fallbackSatelliteData)
+  const [apiStatus, setApiStatus] = useState('CONNECTING')
+  const [collisionAlerts, setCollisionAlerts] = useState([])
+  const [collisionStatus, setCollisionStatus] = useState('SCREENING')
+useEffect(() => {
+  async function loadSatellites() {
+    try {
+      const response = await getSatellites()
+
+      const colors = ['#d7c5ff', '#73cfff', '#e8bd83', '#8ee6c8']
+
+      const mappedSatellites = response.satellites.map((item, index) => {
+        const { x, y, z } = item.position_km
+        const { x: vx, y: vy, z: vz } = item.velocity_km_s
+
+        const distance = Math.sqrt(x * x + y * y + z * z)
+        const speed = Math.sqrt(vx * vx + vy * vy + vz * vz)
+        const altitude = Math.max(0, distance - 6371)
+
+        const type =
+          altitude < 2000 ? 'LEO' :
+          altitude < 30000 ? 'MEO' : 'GEO'
+
+        return {
+          id: String(item.norad_id),
+          name: item.name,
+          type,
+          altitude: `${altitude.toFixed(0)} km`,
+          velocity: `${speed.toFixed(2)} km/s`,
+          status: 'Tracked',
+          color: colors[index % colors.length],
+          initialFuel: 100,
+          position_km: item.position_km,
+          velocity_km_s: item.velocity_km_s,
+          timestamp: item.timestamp,
+        }
+      })
+
+      setSatelliteData(mappedSatellites)
+      setFuelReserves((previous) => {
+        const updated = { ...previous }
+
+        mappedSatellites.forEach((satellite) => {
+          if (updated[satellite.id] === undefined) {
+            updated[satellite.id] = satellite.initialFuel
+          }
+        })
+
+        return updated
+      })
+
+      setApiStatus('CONNECTED')
+    } catch (error) {
+      console.error('Could not load satellite data:', error)
+      setApiStatus('OFFLINE')
+    }
+  }
+
+  loadSatellites()
+}, [])
+
+useEffect(() => {
+  let cancelled = false
+
+  async function loadCollisions() {
+    try {
+      setCollisionStatus('SCREENING')
+      const response = await getCollisions()
+
+      if (cancelled) return
+
+      const mappedAlerts = (response.alerts || []).map((item) => ({
+        satelliteId: String(item.norad_id_1),
+        debrisId: String(item.norad_id_2),
+        satellite: item.object_1,
+        debris: item.object_2,
+        distance: item.closest_approach_km,
+        time: item.time_of_closest_approach
+          ? new Date(item.time_of_closest_approach).toLocaleTimeString()
+          : 'Unknown',
+        priority:
+          item.closest_approach_km <= 1 ? 'HIGH' :
+          item.closest_approach_km <= 5 ? 'MEDIUM' : 'LOW',
+        encounter: item,
+      }))
+
+      setCollisionAlerts(mappedAlerts)
+      setCollisionStatus('CONNECTED')
+    } catch (error) {
+      console.error('Collision screening failed:', error)
+      if (!cancelled) setCollisionStatus('ERROR')
+    }
+  }
+
+  loadCollisions()
+  return () => {
+    cancelled = true
+  }
+}, [])
 const [selectedSatellite, setSelectedSatellite] = useState(null)
 const [isPaused, setIsPaused] = useState(false)
 const [searchTerm, setSearchTerm] = useState('')
@@ -16,6 +114,8 @@ const [objectType, setObjectType] = useState('SATELLITES')
 const [simulationTime, setSimulationTime] = useState(0)
 const [selectedAlert, setSelectedAlert] = useState(null)
 const [manoeuvre, setManoeuvre] = useState(null)
+const [optimizationLoading, setOptimizationLoading] = useState(false)
+const [optimizationError, setOptimizationError] = useState('')
 const [fuelReserves, setFuelReserves] = useState(() =>
   Object.fromEntries(
     satelliteData.map((satellite) => [
@@ -39,7 +139,6 @@ const [trackingActivity, setTrackingActivity] = useState([
 const selectedSatelliteData = satelliteData.find(
   (satellite) => satellite.id === selectedSatellite
 )
-const collisionAlerts = detectCollisions(simulationTime)
 const orbitalDistribution = ['LEO', 'MEO', 'GEO'].map((orbit) => ({
   name: orbit,
   count: satelliteData.filter(
@@ -67,7 +166,9 @@ const filteredSatellites = currentObjects.filter((satellite) => {
         <header className="topbar">
           <div className="breadcrumb">MISSION CONTROL / OVERVIEW</div>
           <div className="topbar-right">
-            <span className="live-indicator"><i /> LIVE DATA</span>
+         <span className="live-indicator">
+  <i /> {apiStatus === 'CONNECTED' ? 'LIVE DATA' : apiStatus}
+</span>
             <div className="avatar">TS</div>
           </div>
         </header>
@@ -316,6 +417,7 @@ FUEL AFTER DISPOSAL: {
               <div className="earth-container">
            <Earth
   selectedSatellite={selectedSatellite}
+  satellites={satelliteData}
   onSatelliteSelect={setSelectedSatellite}
   isPaused={isPaused}
   onPauseChange={setIsPaused}
@@ -401,7 +503,9 @@ FUEL AFTER DISPOSAL: {
             <div className="panel-heading">
               <span>COLLISION MONITOR</span>
               <span className="alert-count">
-  {collisionAlerts.length} ALERTS
+  {collisionStatus === 'CONNECTED'
+    ? `${collisionAlerts.length} ALERTS`
+    : collisionStatus}
 </span>
             </div>
 
@@ -438,7 +542,13 @@ FUEL AFTER DISPOSAL: {
   <strong>{collisionAlerts.length}</strong>
   <span>Detected close approaches</span>
 </div>
-            <small className="muted">Waiting for orbital calculations</small>
+            <small className="muted">
+              {collisionStatus === 'CONNECTED'
+                ? 'Backend orbital screening completed'
+                : collisionStatus === 'ERROR'
+                  ? 'Collision screening unavailable'
+                  : 'Running orbital screening...'}
+            </small>
 <div className="fuel-panel">
   <div className="fuel-heading">
     <span>FUEL RESERVE</span>
@@ -472,108 +582,112 @@ FUEL AFTER DISPOSAL: {
 {selectedAlert && (
   <button
     className="manoeuvre-button"
-    onClick={() =>
-      setManoeuvre(generateManoeuvre(selectedAlert))
-    }
+    disabled={optimizationLoading}
+    onClick={async () => {
+      setOptimizationLoading(true)
+      setOptimizationError('')
+      setManoeuvre(null)
+
+      try {
+        const result = await optimizeEncounter({
+          encounter: selectedAlert.encounter,
+          initial_mass: 500,
+          specific_impulse: 220,
+          safety_threshold_km: 5,
+          max_delta_v: 1,
+          step_size: 0.1,
+        })
+
+        if (!result.success || !result.optimization?.success) {
+          throw new Error(
+            result.optimization?.message ||
+            result.message ||
+            'No suitable manoeuvre was found for this encounter.'
+          )
+        }
+
+        const optimization = result.optimization
+        const evaluation = optimization.evaluation
+
+        setManoeuvre({
+          satellite: result.object_1,
+          debris: result.object_2,
+          deltaV: Math.hypot(...optimization.delta_v_km_s) * 1000,
+          before: evaluation.before.minimum_distance_km,
+          after: evaluation.after.minimum_distance_km,
+          improvement: evaluation.improvement_km,
+          fuel: evaluation.fuel.fuel_consumed_kg,
+          decision: evaluation.decision,
+          status: 'PROPOSED — NOT EXECUTED',
+        })
+      } catch (error) {
+        console.error('Avoidance optimization failed:', error)
+        setOptimizationError(error.message || 'Avoidance optimization failed.')
+      } finally {
+        setOptimizationLoading(false)
+      }
+    }}
   >
-    GENERATE AVOIDANCE MANOEUVRE
+    {optimizationLoading ? 'OPTIMIZING...' : 'OPTIMIZE AVOIDANCE MANOEUVRE'}
   </button>
+)}
+
+{optimizationError && (
+  <div className="manoeuvre-result">
+    <span>OPTIMIZATION MESSAGE</span>
+    <p>{optimizationError}</p>
+  </div>
 )}
 
 {manoeuvre && (
   <div className="manoeuvre-result">
-    <span>PROPOSED MANOEUVRE</span>
-
+    <span>BACKEND-OPTIMIZED MANOEUVRE</span>
     <strong>{manoeuvre.satellite}</strong>
 
     <div>
-      <small>Target debris</small>
+      <small>Other tracked object</small>
       <strong>{manoeuvre.debris}</strong>
     </div>
 
     <div>
-      <small>Predicted separation</small>
-      <strong>{manoeuvre.predictedDistance} units</strong>
+      <small>Separation before manoeuvre</small>
+      <strong>{manoeuvre.before.toFixed(3)} km</strong>
     </div>
 
     <div>
-      <small>Fuel consumption</small>
-      <strong>{manoeuvre.fuelCost} units</strong>
+      <small>Predicted separation after manoeuvre</small>
+      <strong>{manoeuvre.after.toFixed(3)} km</strong>
     </div>
 
     <div>
-      <small>Burn duration</small>
-      <strong>{manoeuvre.burnDuration} sec</strong>
+      <small>Separation improvement</small>
+      <strong>{manoeuvre.improvement.toFixed(3)} km</strong>
     </div>
 
-    <span className="manoeuvre-status">
-      {manoeuvre.status}
-    </span>
-    <div className="manoeuvre-actions">
-<button
-  className="execute-button"
-  onClick={() => {
-    const targetSatellite = satelliteData.find(
-      (satellite) => satellite.name === manoeuvre.satellite
-    )
+    <div>
+      <small>Optimized delta-v</small>
+      <strong>{manoeuvre.deltaV.toFixed(3)} m/s</strong>
+    </div>
 
-    if (!targetSatellite) {
-      alert('Satellite not found!')
-      return
-    }
+    <div>
+      <small>Estimated propellant consumed</small>
+      <strong>{manoeuvre.fuel.toFixed(4)} kg</strong>
+    </div>
 
-    const currentFuel = fuelReserves[targetSatellite.id] ?? 0
-
-    if (currentFuel < manoeuvre.fuelCost) {
-      alert('Insufficient fuel reserve!')
-      return
-    }
-
-    setFuelReserves((prev) => ({
-      ...prev,
-      [targetSatellite.id]: Math.max(
-        0,
-        (prev[targetSatellite.id] ?? 0) - manoeuvre.fuelCost
-      ),
-    }))
-
-    setManoeuvre((current) => ({
-      ...current,
-      status: 'EXECUTED',
-    }))
-
-    setTrackingActivity((activities) => [
-      {
-        id: Date.now(),
-        action: 'AVOIDANCE MANOEUVRE',
-        target: manoeuvre.satellite,
-        time: `T+${simulationTime}`,
-      },
-      ...activities,
-    ].slice(0, 4))
-  }}
-  disabled={
-    manoeuvre.status === 'EXECUTED' ||
-    (fuelReserves[
-      satelliteData.find((satellite) =>
-        satellite.name === manoeuvre.satellite
-      )?.id
-    ] ?? 0) < manoeuvre.fuelCost
-  }
->
-  EXECUTE
-</button>
-
-  <button
-    className="cancel-button"
-    onClick={() => {
-      setManoeuvre(null)
-      setSelectedAlert(null)
-    }}
-  >
-    CANCEL
-  </button>
-</div>
+    <span className="manoeuvre-status">{manoeuvre.decision}</span>
+    <small className="muted">
+      Planning result only. No spacecraft command has been sent or executed.
+    </small>
+    <button
+      className="cancel-button"
+      onClick={() => {
+        setManoeuvre(null)
+        setSelectedAlert(null)
+        setOptimizationError('')
+      }}
+    >
+      CLOSE
+    </button>
   </div>
 )}
 
@@ -625,7 +739,7 @@ FUEL AFTER DISPOSAL: {
       <div className="analytics-grid">
         <div>
           <strong>{satelliteData.length}</strong>
-          <span>SATELLITES</span>
+          <span>TRACKED OBJECTS</span>
         </div>
         <div>
           <strong>{debrisData.length}</strong>
@@ -670,7 +784,7 @@ FUEL AFTER DISPOSAL: {
       </div>
       <div className="system-status">
         <i className="status-online" />
-        Collision Detection — ONLINE
+        Collision Detection — BACKEND
       </div>
       <div className="system-status">
         <i className="status-online" />
@@ -682,7 +796,7 @@ FUEL AFTER DISPOSAL: {
       </div>
       <div className="system-status">
         <i className="status-pending" />
-        Backend API — INTEGRATING
+        Backend API — CONNECTED
       </div>
     </div>
   )}
@@ -697,7 +811,7 @@ FUEL AFTER DISPOSAL: {
         <div className="analytics-grid">
   <div>
     <strong>{satelliteData.length}</strong>
-    <span>SATELLITES</span>
+    <span>TRACKED OBJECTS</span>
   </div>
 
   <div>
@@ -749,7 +863,7 @@ FUEL AFTER DISPOSAL: {
 
 <div className="system-status">
   <i className="status-online" />
-  Collision Detection — ONLINE
+  Collision Detection — BACKEND
 </div>
 
 <div className="system-status">
@@ -764,7 +878,7 @@ FUEL AFTER DISPOSAL: {
 
 <div className="system-status">
   <i className="status-pending" />
-  Backend API — INTEGRATING
+  Backend API — CONNECTED
 </div>
           </section>
 
